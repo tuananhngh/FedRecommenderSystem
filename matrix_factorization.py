@@ -29,7 +29,6 @@ class UserEmbedding(nn.Module):
         self.tensor_shape = torch.empty(1, self.num_latent_factors)
         self.embedding = nn.Parameter(nn.init.kaiming_uniform_(self.tensor_shape))
         
-        
     def forward(self, input):
         embedding = self.embedding
         return embedding
@@ -113,30 +112,31 @@ class MatrixFactorizationModel(nn.Module):
         self.global_layers = nn.ModuleList()
         self.local_layers = nn.ModuleList()
 
-        self.item_embedding_layer = ItemEmbedding(self.num_items, self.num_latent_factors)
-        self.global_layers.append(self.item_embedding_layer)
+        item_embedding_layer = ItemEmbedding(self.num_items, self.num_latent_factors)
+        self.global_layers.append(item_embedding_layer)
         self.spread_out = EmbeddingSpreadoutRegularizer(spreadout_lambda=spreadout_lambda, l2_normalize=False, l2_regularization=l2_regularizer)
         
         if self.personal_model:
-            self.user_embedding_layer = UserEmbedding(num_latent_factors)
-            self.local_layers.append(self.user_embedding_layer)
+            user_embedding_layer = UserEmbedding(num_latent_factors)
+            self.local_layers.append(user_embedding_layer)
         else:
-            self.user_embedding_layer = FullUserEmbedding(num_embeddings=num_users,
+            user_embedding_layer = FullUserEmbedding(num_embeddings=num_users,
                                                      embedding_dim=num_latent_factors)
-            self.local_layers.append(self.user_embedding_layer)
+            self.local_layers.append(user_embedding_layer)
         
         if add_biases:
             if personal_model:
-                self.user_bias_layer = AddBias(dim=(1,1))
-                self.local_layers.append(self.user_bias_layer)
+                user_bias_layer = AddBias(dim=(1,1))
+                self.local_layers.append(user_bias_layer)
             else:
-                self.user_bias_layer = AddBias(dim=(num_users, 1))
-                self.local_layers.append(self.user_bias_layer)
+                user_bias_layer = AddBias(dim=(num_users, 1))
+                self.local_layers.append(user_bias_layer)
             
-            self.item_bias = AddBias(dim=(self.num_items, 1))
-            self.global_layers.append(self.item_bias)
-            self.global_bias = AddBias(dim=(1,1))
-            self.global_layers.append(self.global_bias)
+            item_bias = AddBias(dim=(self.num_items, 1))
+            self.global_layers.append(item_bias)
+            
+            global_bias = AddBias(dim=(1,1))
+            self.global_layers.append(global_bias)
             
     def global_parameters(self):
         return [params for params in self.global_layers.parameters()]
@@ -146,26 +146,26 @@ class MatrixFactorizationModel(nn.Module):
         
     
     def forward(self, user_input, item_input):
-        user_embedding = self.user_embedding_layer(user_input)
-        item_embedding = self.item_embedding_layer(item_input)
+        user_embedding = [layer(user_input) for layer in self.local_layers]
+        item_embedding = [layer(item_input) for layer in self.global_layers]
 
         #print(f"User Embedding {user_embedding.shape} : {user_embedding}")
         #print(f"Item Embedding {item_embedding.shape} : {item_embedding}")
         
-        flat_item_vec = item_embedding.view(-1, self.num_latent_factors)
-        flat_user_vec = user_embedding.view(-1, self.num_latent_factors)
+        flat_item_vec = item_embedding[0].view(-1, self.num_latent_factors)
+        flat_user_vec = user_embedding[0].view(-1, self.num_latent_factors)
         
         prediction = torch.matmul(flat_user_vec, flat_item_vec.T).view(-1)
         if self.add_biases:
-            flat_user_bias = self.user_bias_layer(user_input).view(-1)
-            flat_item_bias = self.item_bias(item_input).view(-1)
+            flat_user_bias = user_embedding[1].view(-1)
+            flat_item_bias = item_embedding[1].view(-1)
             prediction += flat_user_bias + flat_item_bias
-            prediction = prediction + self.global_bias(0)
+            prediction = prediction + item_embedding[-1].view(-1)
         
-        if self.l2_regularizer > 0.0:
-            for param in self.parameters():
-                l2_reg = self.l2_regularizer * torch.norm(param, p=2)**2
-                prediction += l2_reg #+ self.spread_out(self.item_embedding_layer.item_embedding)
+        # if self.l2_regularizer > 0.0:
+        #     for param in self.parameters():
+        #         l2_reg = self.l2_regularizer * torch.norm(param, p=2)**2
+        #         prediction += l2_reg #+ self.spread_out(self.item_embedding_layer.item_embedding)
             
         return prediction
     
@@ -198,9 +198,9 @@ class ReconstructionAccuracyMetric:
         self.count = 0
     
 
-# model, global_params, local_params = build_reconstruction_model(num_users=100, num_items=10, num_latent_factors=5, personal_model=True, add_biases=True, l2_regularizer=0.8, spreadout_lambda=0.0)
-# user_id = torch.tensor([1])
-# item_id = torch.tensor([9])
+model, global_params, local_params = build_reconstruction_model(num_users=100, num_items=10, num_latent_factors=5, personal_model=True, add_biases=True, l2_regularizer=0.8, spreadout_lambda=0.0)
+user_id = torch.tensor([1])
+item_id = torch.tensor([9])
 # model_2, global_params2, local_params2 = build_reconstruction_model(num_users=100, num_items=10, num_latent_factors=5, personal_model=True, add_biases=True, l2_regularizer=0.8, spreadout_lambda=0.0)
 # ex_loss = model(user_id, item_id)
 # local_params = model.local_parameters()

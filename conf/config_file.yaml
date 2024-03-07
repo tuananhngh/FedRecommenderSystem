@@ -1,0 +1,12 @@
+data :
+  data_name : movielens
+  data_url : http://files.grouplens.org/datasets/movielens/ml-1m.zip
+  download_dir : /srv/storage/energyfl@storage1.toulouse.grid5000.fr/FLDATA/${data.data_name}
+  data_dir : ${data.download_dir}
+  min_examples_user : 50
+  max_clients : 4000
+
+
+hydra:
+  run:
+    dir: ${data.data_dir}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S} #/srv/storage/energyfl@storage1.toulouse.grid5000.fr/Simulation/MovieLens/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}

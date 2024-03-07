@@ -1,7 +1,10 @@
 # Description: Load MovieLens data and create a dataset for training and testing.
 # Code adapted from https://www.tensorflow.org/federated/tutorials/federated_reconstruction_for_matrix_factorization
 
+from ast import Dict
+from logging import config
 import random
+import hydra
 import requests
 import zipfile
 import io
@@ -11,28 +14,25 @@ import os
 import collections
 import matplotlib.pyplot as plt
 import torch
+from omegaconf import DictConfig
 from torch.utils.data import Dataset, Subset, DataLoader
 from typing import Tuple, Optional, List
 
-path_to_1m = "/Volumes/T7 Touch/TheseProject/FLDATA/MovieLens"
-def download_movielens_data(dataset_path):
-  """Downloads and copies MovieLens data to local /tmp directory."""
-  if dataset_path.startswith('http'):
-    r = requests.get(dataset_path)
-    z = zipfile.ZipFile(io.BytesIO(r.content))
-    z.extractall(path=path_to_1m)
-  else:
-    os.makedirs(path_to_1m, exist_ok=True)
-    for filename in ['ratings.dat', 'movies.dat', 'users.dat']:
-        shutil.copy(
-          os.path.join(dataset_path, filename),
-          os.path.join(path_to_1m, filename),
-          overwrite=True)
+#path_to_1m = "/Volumes/T7 Touch/TheseProject/FLDATA/MovieLens"
 
-#download_movielens_data('http://files.grouplens.org/datasets/movielens/ml-1m.zip')
+def download_movielens_data():
+    config_dir = os.path.abspath("conf")
+    hydra.initialize_config_dir(config_dir=config_dir)
+    cfg = hydra.compose(config_name="config_file")
+    r = requests.get(cfg.data.data_url)
+    z = zipfile.ZipFile(io.BytesIO(r.content))
+    z.extractall(path=cfg.data.download_dir)
+
+#download_movielens_data()
+
 
 def load_movielens_data(
-    data_directory: str = path_to_1m,
+    data_directory: str,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
   """Loads pandas DataFrames for ratings, movies, users from data directory."""
   # Load pandas DataFrames from data directory. Assuming data is formatted as
@@ -162,8 +162,30 @@ def create_user_dataloader(dataset,trainfrac,valfrac,batch_size):
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=True)
     #print(len(train_loader.dataset), len(val_loader.dataset), len(test_loader.dataset))
     return train_loader, val_loader, test_loader
+
+def get_user_dataloaders(user_datasets, trainfrac, valfrac, batch_size):
+    train_loaders = []
+    val_loaders = []
+    test_loaders = []
+    for dataset in user_datasets:
+        train_loader, val_loader, test_loader = create_user_dataloader(dataset, trainfrac, valfrac, batch_size)
+        train_loaders.append(train_loader)
+        val_loaders.append(val_loader)
+        test_loaders.append(test_loader)
+    return train_loaders, val_loaders, test_loaders
     
 
+#@hydra.main(config_path="conf", config_name="config_file", version_base="1.1")
+# config_dir = os.path.abspath("conf")
+# hydra.initialize_config_dir(config_dir=config_dir)
+# cfg = hydra.compose(config_name="config_file")
+
+def main(cfg:DictConfig):
+    ratings_df, movies_df = load_movielens_data(cfg.data.download_dir)
+    user_datasets = create_user_datasets(ratings_df, min_examples_per_user=50, max_clients=4000)
+    train_users, val_users, test_users = split_dataset(user_datasets, 0.8, 0.1)
+
+# ratings_df, movies_df, user_datasets, train_users, val_users, test_users = main(cfg)
 
 # ratings_df, movies_df = load_movielens_data(path_to_1m)
 # user_datasets = create_user_datasets(ratings_df, min_examples_per_user=50, max_clients=4000)
