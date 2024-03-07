@@ -5,6 +5,9 @@ __pycache__/
 
 energyfl/
 outputs/
+mount_storage.sh
+*.ipynb 
+
 
 # C extensions
 *.so
