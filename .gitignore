@@ -3,6 +3,15 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+#Unnecessary files
+outputs/
+*.csv
+*.ipynb
+*.png
+*.pkl
+mount_storage.sh
+
+
 # C extensions
 *.so
 
