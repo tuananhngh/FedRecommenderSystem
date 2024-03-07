@@ -3,8 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-/energyfl/
-/outputs/
+energyfl/
+outputs/
 
 # C extensions
 *.so
