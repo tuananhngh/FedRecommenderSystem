@@ -1,7 +1,6 @@
 # Description: Load MovieLens data and create a dataset for training and testing.
 # Code adapted from https://www.tensorflow.org/federated/tutorials/federated_reconstruction_for_matrix_factorization
 
-from ast import Dict
 from logging import config
 import random
 import hydra
@@ -14,8 +13,9 @@ import os
 import collections
 import matplotlib.pyplot as plt
 import torch
+import numpy as np
 from omegaconf import DictConfig
-from torch.utils.data import Dataset, Subset, DataLoader
+from torch.utils.data import Dataset, Subset, DataLoader, random_split
 from typing import Tuple, Optional, List
 
 #path_to_1m = "/Volumes/T7 Touch/TheseProject/FLDATA/MovieLens"
@@ -114,76 +114,91 @@ class MovieRatingDataset(Dataset):
         return len(self.x)
    
 
-def create_user_datasets(ratings_df: pd.DataFrame,
-                         max_examples_per_user: Optional[int] = None,
-                         min_examples_per_user: int = 0,
-                         max_clients: Optional[int] = None) -> List[Subset]:
-    num_users = len(ratings_df.UserID.unique())
-    if max_clients is not None:
-        num_users = min(num_users, max_clients)
-    user_datasets = []
-    for i in range(num_users):
-        user_ratings_df = ratings_df[ratings_df.UserID == i]
-        if len(user_ratings_df) > min_examples_per_user:
-            if max_examples_per_user is not None:
-                n = min(len(user_ratings_df), max_examples_per_user)
-                user_ratings_df = user_ratings_df.sample(n, random_state=42)
-            user_data = MovieRatingDataset(user_ratings_df)
-            user_datasets.append(user_data)
-    return user_datasets
+data_dir = "/srv/storage/energyfl@storage1.toulouse.grid5000.fr/FLDATA/movielens"
+ratings_df, movies_df = load_movielens_data(data_dir)
+grouped_user = ratings_df.groupby('UserID')
+grouped_movie = movies_df.groupby('MovieID')
+nb_users, nb_movies = len(grouped_user), len(grouped_movie)
+print(f"Number of users: {nb_users}, Number of movies: {nb_movies}")
+nb_hosts = 10
+user_per_host = nb_users // nb_hosts
+user_idx = np.arange(nb_users)
+np.random.shuffle(user_idx)
+partition = np.array_split(user_idx, nb_hosts)
 
+class MovieRatingDataset(Dataset):
+    def __init__(self, ratings_df):
+        self.users = torch.tensor(ratings_df.UserID.values, dtype=torch.long)
+        self.movies = torch.tensor(ratings_df.MovieID.values, dtype=torch.long)
+        self.x = torch.stack([self.users, self.movies], dim=1)
+        self.y = torch.tensor(ratings_df.Rating.values, dtype=torch.float32)
         
-def split_dataset(user_datasets, train_frac, val_frac):
-    """_summary_
-    Split users to train, validation and test
-    Args:
-        user_datasets (_type_): List[Dataset]
-        val_per (_type_): _description_
-        test_per (_type_): _description_
-    """
-    n = len(user_datasets)
-    train_idx = int(n * train_frac)
-    val_idx = int(n * (train_frac + val_frac))
-    train_datasets = user_datasets[:train_idx]
-    val_datasets = user_datasets[train_idx:val_idx]
-    test_datasets = user_datasets[val_idx:]
-    return train_datasets, val_datasets, test_datasets
+    def __getitem__(self, index) -> Tuple[torch.Tensor, torch.Tensor]:
+       return self.x[index], self.y[index]
+   
+    def __len__(self) -> int:
+        return len(self.x)
 
-def create_user_dataloader(dataset,trainfrac,valfrac,batch_size):
-    nb_rating_user = len(dataset)
-    train_idx = int(nb_rating_user*trainfrac)
-    val_idx = int(nb_rating_user*(trainfrac+valfrac))
-    train_dataset = Subset(dataset, range(0,train_idx))
-    val_dataset = Subset(dataset, range(train_idx,val_idx))
-    test_dataset = Subset(dataset, range(val_idx,nb_rating_user))
+def create_host_datasets(ratings_df:pd.DataFrame, movies_df:pd.DataFrame, nb_hosts:int, batch_size:int, test_frac:float=0.3, val_frac:float=0.2, shuffle:bool=True)->Tuple[List[DataLoader], List[DataLoader], DataLoader]:
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=1, shuffle=True)
-    #print(len(train_loader.dataset), len(val_loader.dataset), len(test_loader.dataset))
-    return train_loader, val_loader, test_loader
+    grouped_user = ratings_df.groupby('UserID')
+    grouped_movie = movies_df.groupby('MovieID')
+    nb_users, nb_movies = len(grouped_user), len(grouped_movie)
+    print(f"Number of users: {nb_users}, Number of movies: {nb_movies}")
+    test_users = np.random.choice(nb_users, int(test_frac*nb_users), replace=False)
+    #TestDATA
+    test_data = ratings_df[ratings_df.UserID.isin(test_users)]
+    test_dataset = MovieRatingDataset(test_data)
+    testloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
+    #TrainDATA
+    train_data = ratings_df[~ratings_df.UserID.isin(test_users)]
+    nb_train_users = len(train_data.UserID.unique())
+    users_per_host = nb_train_users // nb_hosts
+    user_idx = np.arange(nb_users)
+    if shuffle:
+        np.random.shuffle(user_idx)
+    partition = np.array_split(user_idx, nb_hosts)
+    trainloaders = []
+    valloaders = []
+    for i in range(nb_hosts):
+        user_ratings = ratings_df[ratings_df.UserID.isin(partition[i])]
+        userid, movieid,rating = user_ratings.UserID.values, user_ratings.MovieID.values, user_ratings.Rating.values   
+        user_data = MovieRatingDataset(user_ratings)
+        len_val = int(val_frac*len(user_data))
+        len_train = len(user_data) - len_val
+        train,val = random_split(user_data, [len_train, len_val], generator=torch.Generator().manual_seed(42))
+        trainloader = DataLoader(train, batch_size=batch_size, shuffle=True)
+        valloader = DataLoader(val, batch_size=batch_size, shuffle=True)
+        trainloaders.append(trainloader)
+        valloaders.append(valloader)
+    return trainloaders,valloaders,testloader
 
-def get_user_dataloaders(user_datasets, trainfrac, valfrac, batch_size):
-    train_loaders = []
-    val_loaders = []
-    test_loaders = []
-    for dataset in user_datasets:
-        train_loader, val_loader, test_loader = create_user_dataloader(dataset, trainfrac, valfrac, batch_size)
-        train_loaders.append(train_loader)
-        val_loaders.append(val_loader)
-        test_loaders.append(test_loader)
-    return train_loaders, val_loaders, test_loaders
-    
 
-#@hydra.main(config_path="conf", config_name="config_file", version_base="1.1")
-# config_dir = os.path.abspath("conf")
-# hydra.initialize_config_dir(config_dir=config_dir)
-# cfg = hydra.compose(config_name="config_file")
+from model import MatrixCompletion
+mc = MatrixCompletion(num_users= nb_users, num_items=nb_movies, latent_dim=100)
 
-def main(cfg:DictConfig):
-    ratings_df, movies_df = load_movielens_data(cfg.data.download_dir)
-    user_datasets = create_user_datasets(ratings_df, min_examples_per_user=50, max_clients=4000)
-    train_users, val_users, test_users = split_dataset(user_datasets, 0.8, 0.1)
+trainloaders,valloaders,testloader = create_host_datasets(ratings_df, movies_df, nb_hosts=10,batch_size=64)
+lss = []
+for x,y in trainloaders[0]:
+    users_id = x[:,0]
+    items_id = x[:,1]
+    pred = mc(users_id, items_id)
+    loss = torch.nn.functional.mse_loss(pred, y) #+ 0.01*torch.norm(mc.user_embeddings.weight) + 0.01*torch.norm(mc.item_embeddings.weight)
+    #print("Loss value: {}".format(loss.item()))
+    lss.append(loss.item())
+    loss.backward()
+    with torch.no_grad():
+        for name,params in mc.named_parameters():
+            if params.requires_grad:
+                params -= 0.1*params.grad 
+                params.grad.zero_()
+plt.plot(lss)
+
+
+# def main(cfg:DictConfig):
+#     ratings_df, movies_df = load_movielens_data(cfg.data.download_dir)
+#     user_datasets = create_user_datasets(ratings_df, min_examples_per_user=50, max_clients=4000)
+#     train_users, val_users, test_users = split_dataset(user_datasets, 0.8, 0.1)
 
 # ratings_df, movies_df, user_datasets, train_users, val_users, test_users = main(cfg)
 
