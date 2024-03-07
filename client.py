@@ -33,6 +33,7 @@ class SimpleClient(fl.client.NumPyClient):
         self.model.load_state_dict(state_dict, strict = False)
         
     def fw_iteration(self):
+        pass
         
         
 

@@ -5,6 +5,7 @@ __pycache__/
 
 energyfl/
 outputs/
+FrankWolfeUtils/
 mount_storage.sh
 *.ipynb 
 

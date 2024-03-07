@@ -175,6 +175,7 @@ def create_host_datasets(ratings_df:pd.DataFrame, movies_df:pd.DataFrame, nb_hos
 
 
 from model import MatrixCompletion
+from frankwolfe.feasible_regions import nuclear_norm_ball
 mc = MatrixCompletion(num_users= nb_users, num_items=nb_movies, latent_dim=100)
 
 trainloaders,valloaders,testloader = create_host_datasets(ratings_df, movies_df, nb_hosts=10,batch_size=64)
@@ -194,6 +195,17 @@ for x,y in trainloaders[0]:
                 params.grad.zero_()
 plt.plot(lss)
 
+NuclearNorm = nuclear_norm_ball(dim1=nb_movies, dim2=nb_users, alpha=100)
+full_mat = torch.matmul(mc.user_embeddings.weight, mc.item_embeddings.weight.T)
+example_w = full_mat.detach().numpy()
+lmo = NuclearNorm.linear_optimization_oracle(example_w)
+proj = NuclearNorm.project(example_w)
+
+
+mc2 = MatrixCompletion(num_users= nb_users, num_items=nb_movies, latent_dim=100)
+for name,params in mc2.named_parameters():
+    if params.requires_grad:
+        print(name, params)
 
 # def main(cfg:DictConfig):
 #     ratings_df, movies_df = load_movielens_data(cfg.data.download_dir)
