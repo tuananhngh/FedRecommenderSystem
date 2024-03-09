@@ -121,18 +121,7 @@ def print_top_genres_for_user(ratings_df, movies_df, user_id):
   for (genre, freq) in genre_count.most_common(5):
     print(f'{genre} was rated {freq} times')
     
-    
-class MovieRatingDataset(Dataset):
-    def __init__(self, ratings_df):
-        self.x = torch.tensor(ratings_df.MovieID.values, dtype=torch.long)
-        self.y = torch.tensor(ratings_df.Rating.values, dtype=torch.float32)
-    def __getitem__(self, index) -> Tuple[torch.Tensor, torch.Tensor]:
-       return self.x[index], self.y[index]
    
-    def __len__(self) -> int:
-        return len(self.x)
-   
-
 class MovieRatingDataset(Dataset):
     def __init__(self, ratings_df):
         self.users = torch.tensor(ratings_df.UserID.values, dtype=torch.long)
@@ -147,20 +136,16 @@ class MovieRatingDataset(Dataset):
     def __len__(self) -> int:
         return len(self.x)
     
-class MovieRatingDatasetNumpy:
-    def __init__(self, ratings_df):
-        self.users = ratings_df.UserID.values
-        self.movies = ratings_df.MovieID.values
-        self.x = np.stack([self.users, self.movies], axis=1)
-        self.y = ratings_df.Rating.values
-        
-    def __getitem__(self, index) -> Tuple[np.ndarray, np.ndarray]:
-         return self.x[index], self.y[index]
-     
-    def __len__(self) -> int:
-        return len(self.x)
 
-def create_host_dataloaders(ratings_df:pd.DataFrame, movies_df:pd.DataFrame, nb_hosts:int, batch_size:int, test_frac:float=0.1, val_frac:float=0.2, shuffle:bool=True, distributed=False)->Tuple[List[DataLoader], List[DataLoader], DataLoader]:
+def create_host_dataloaders(ratings_df:pd.DataFrame, 
+                            movies_df:pd.DataFrame, 
+                            nb_hosts:int, 
+                            batch_size:int, 
+                            test_frac:float=0.1, 
+                            val_frac:float=0.2, 
+                            shuffle:bool=True, 
+                            distributed=False)->Tuple[List[DataLoader], List[DataLoader], DataLoader]:
+    
     grouped_user = ratings_df.groupby('UserID')
     grouped_movie = movies_df.groupby('MovieID')
     nb_users, nb_movies = len(grouped_user), len(grouped_movie)
@@ -204,6 +189,3 @@ def create_host_dataloaders(ratings_df:pd.DataFrame, movies_df:pd.DataFrame, nb_
             trainloaders.append(trainloader)
             valloaders.append(valloader)
         return trainloaders, valloaders, testloader
-
-
-
