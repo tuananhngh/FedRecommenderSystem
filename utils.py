@@ -2,11 +2,11 @@
 
 import torch
 import torch.nn.functional as F
-from torch.optim import Optimizer
-#from frankwolfe.feasible_regions import nuclear_norm_ball
+from torch.optim import Optimizer, SGD
 from scipy.sparse.linalg import svds
 import numpy as np
 
+device = torch.device("mps")
 
 @torch.no_grad()
 def get_avg_init_norm(layer, param_type=None, ord=2, repetitions=100):
@@ -44,24 +44,26 @@ def convert_lp_radius(r, N, in_ord=2, out_ord='inf'):
 
     return r * N ** (out_ord_rec - in_ord_rec)
 
+
+
 def projection_simplex_sort(vect, s=1):
     assert s > 0, "Radius s must be strictly positive (%d <= 0)" % s
-    (n,) = vect.shape  # will raise ValueError if v is not 1-D
-    if vect.sum() == s and np.alltrue(vect >= 0):
+    n = vect.shape[0]  # will raise ValueError if v is not 1-D
+    if vect.sum() == s and torch.all(vect >= 0):
         return vect
-    v = vect - np.max(vect)
-    u = np.sort(v)[::-1]
-    cssv = np.cumsum(u)
-    rho = np.count_nonzero(u * np.arange(1, n + 1) > (cssv - s)) - 1
+    v = vect - torch.max(vect)
+    u = torch.sort(v, descending=True)[0]
+    cssv = torch.cumsum(u, dim=0)
+    rho = torch.nonzero(u * torch.arange(1, n + 1).to(vect.device) > (cssv - s), as_tuple=True)[0].size(0) - 1
     theta = float(cssv[rho] - s) / (rho + 1)
-    w = (v - theta).clip(min=0)
+    w = torch.clamp(v - theta, min=0)
     return w
+    
 
 @torch.no_grad()
-def make_feasible(model, constraints):
+def make_feasible(model, constraint):
     """Shift all model parameters inside the feasible region defined by constraints"""
     for idx, (name, param) in enumerate(model.named_parameters()):
-        constraint = constraints[idx]
         param.copy_(constraint.shift_inside(param))
 
 class Constraint:
@@ -94,6 +96,10 @@ class Constraint:
 
     def euclidean_project(self, x):
         assert x.numel() == self.n, f"shape {x.shape} does not match dimension {self.n}"
+        
+def nuclear_norm(matrix):
+    norm = torch.norm(matrix, p='nuc')
+    return norm
 
 class NuclearNormBall(Constraint):
     def __init__(self, dim1, dim2, alpha=1.0):
@@ -102,114 +108,47 @@ class NuclearNormBall(Constraint):
         self.dim2 = dim2
         self.alpha = alpha
         
+    @torch.no_grad()
     def lmo(self, x):
         super().lmo(x)
         x = x.view(self.dim1, self.dim2)
-        x = x.detach().cpu().numpy()
-        u, s, vt = svds(-x, k=1, which='LM')
-        return torch.tensor(self.alpha * u @ vt)
+        #print(x.shape)
+        u, s , vt = torch.svd_lowrank(x, q=1)
+        #print(u.shape, s.shape, vt.shape)
+        #u_1 , s_1, vt_1 = u[:,0].unsqueeze(1), s[0], vt[0,:].unsqueeze(0)
+        return -self.alpha * u @ vt.T
     
+    @torch.no_grad()
+    def shift_inside(self, x):
+        return self.euclidean_project(x)
+       
+    # @torch.no_grad() 
+    # def lmo(self, x):
+    #     super().lmo(x)
+    #     x = x.view(self.dim1, self.dim2)
+    #     x = x.detach().cpu().numpy()
+    #     u, s, vt = svds(-x, k=1, which='LM')
+    #     return torch.from_numpy(self.alpha * u @ vt)
+    
+    @torch.no_grad()
     def euclidean_project(self, x):
         super().euclidean_project(x)
         x = x.view(self.dim1, self.dim2)
         u, s, vt = torch.linalg.svd(x, full_matrices=False)
-        return u,s,vt
+        #print(u.shape, s.shape, vt.shape)
+        s_ = projection_simplex_sort(s)
+        return self.alpha * u @ torch.diag(s_) @ vt  
+
+class VanillaFW(Optimizer):
+    def __init__(self, params, learning_rate):
+        if not (0.0 <= learning_rate <= 1.0):
+            raise ValueError("Invalid learning rate: {}".format(learning_rate))
         
-
-x = torch.randn(6000, 3000)
-
-nuclear_norm = NuclearNormBall(6000, 3000, 100)
-v = nuclear_norm.lmo(x)
-v_proj = nuclear_norm.euclidean_project(x)
-
-class LpBall(Constraint):
-    """
-    LMO class for the n-dim Lp-Ball (p=ord) with L2-diameter diameter or radius.
-    """
-
-    def __init__(self, n, ord=2, diameter=None, radius=None):
-        super().__init__(n)
-        self.p = float(ord)
-        self.q = get_lp_complementary_order(self.p)
-
-        assert float(ord) >= 1, f"Invalid order {ord}"
-        if diameter is None and radius is None:
-            raise ValueError("Neither diameter nor radius given.")
-        elif diameter is None:
-            self._radius = radius
-            self._diameter = 2 * convert_lp_radius(radius, self.n, in_ord=self.p, out_ord=2)
-        elif radius is None:
-            self._radius = convert_lp_radius(diameter / 2.0, self.n, in_ord=2, out_ord=self.p)
-            self._diameter = diameter
-        else:
-            raise ValueError("Both diameter and radius given")
-
-    @torch.no_grad()
-    def lmo(self, x):
-        """Returns v with norm(v, self.p) <= r minimizing v*x"""
-        super().lmo(x)
-        if self.p == 1:
-            v = torch.zeros_like(x)
-            maxIdx = torch.argmax(torch.abs(x))
-            v.view(-1)[maxIdx] = -self._radius * torch.sign(x.view(-1)[maxIdx])
-            return v
-        elif self.p == 2:
-            x_norm = float(torch.norm(x, p=2))
-            if x_norm > tolerance:
-                return -self._radius * x.div(x_norm)
-            else:
-                return torch.zeros_like(x)
-        elif self.p == float('inf'):
-            return torch.full_like(x, fill_value=self._radius).masked_fill_(x > 0, -self._radius)
-        else:
-            sgn_x = torch.sign(x).masked_fill_(x == 0, 1.0)
-            absxqp = torch.pow(torch.abs(x), self.q / self.p)
-            x_norm = float(torch.pow(torch.norm(x, p=self.q), self.q / self.p))
-            if x_norm > tolerance:
-                return -self._radius / x_norm * sgn_x * absxqp
-            else:
-                return torch.zeros_like(x)
-
-    @torch.no_grad()
-    def shift_inside(self, x):
-        """Projects x to the LpBall with radius r.
-        NOTE: This is a valid projection, although not the one mapping to minimum distance points.
-        """
-        super().shift_inside(x)
-        x_norm = torch.norm(x, p=self.p)
-        return self._radius * x.div(x_norm) if x_norm > self._radius else x
-
-    @torch.no_grad()
-    def euclidean_project(self, x):
-        """Projects x to the closest (i.e. in L2-norm) point on the LpBall (p = 1, 2, inf) with radius r."""
-        super().euclidean_project(x)
-        if self.p == 1:
-            x_norm = torch.norm(x, p=1)
-            if x_norm > self._radius:
-                sorted = torch.sort(torch.abs(x.flatten()), descending=True).values
-                running_mean = (torch.cumsum(sorted, 0) - self._radius) / torch.arange(1, sorted.numel() + 1,
-                                                                                       device=x.device)
-                is_less_or_equal = sorted <= running_mean
-                # This works b/c if one element is True, so are all later elements
-                idx = is_less_or_equal.numel() - is_less_or_equal.sum() - 1
-                return torch.sign(x) * torch.max(torch.abs(x) - running_mean[idx], torch.zeros_like(x))
-            else:
-                return x
-        elif self.p == 2:
-            x_norm = torch.norm(x, p=2)
-            return self._radius * x.div(x_norm) if x_norm > self._radius else x
-        elif self.p == float('inf'):
-            return torch.clamp(x, min=-self._radius, max=self._radius)
-        else:
-            raise NotImplementedError(f"Projection not implemented for order {self.p}")
-
+        default = dict(lr=learning_rate)
+        super(VanillaFW, self).__init__(params, defaults)
     
-
-class StochasticFrankWolfe(Optimizer):
-    def __init__(self, *args, **kwargs):
-        pass
-    
-    def step(self, constraint, closure=None):
+    @torch.no_grad()
+    def step(self, constraints, closure=None):
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -220,12 +159,110 @@ class StochasticFrankWolfe(Optimizer):
                 if p.grad is None:
                     continue
                 d_p = p.grad
+                v = constraints[idx].lmo(d_p)
+                lr = max(0.0, min(group['lr'], 1.0))
+                p.mul_(1 - lr)
+                p.add_(v, alpha=lr)
+                idx += 1
+        return loss
+                    
+        
+class SFW(torch.optim.Optimizer):
+    """Stochastic Frank Wolfe Algorithm
+    Args:
+        params (iterable): iterable of parameters to optimize or dicts defining
+            parameter groups
+        learning_rate (float): learning rate between 0.0 and 1.0
+        rescale (string or None): Type of learning_rate rescaling. Must be 'diameter', 'gradient' or None
+        momentum (float): momentum factor, 0 for no momentum
+    """
+
+    def __init__(self, params, learning_rate=0.1, rescale='diameter', momentum=0.9):
+        if not (0.0 <= learning_rate <= 1.0):
+            raise ValueError("Invalid learning rate: {}".format(learning_rate))
+        if not (0.0 <= momentum <= 1.0):
+            raise ValueError("Momentum must be between [0, 1].")
+        if not (rescale in ['diameter', 'gradient', None]):
+            raise ValueError("Rescale type must be either 'diameter', 'gradient' or None.")
+
+        # Parameters
+        self.rescale = rescale
+
+        defaults = dict(lr=learning_rate, momentum=momentum)
+        super(SFW, self).__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, constraints, closure=None):
+        """Performs a single optimization step.
+        Args:
+            constraints (iterable): list of constraints, where each is an initialization of Constraint subclasses
+            parameter groups
+            closure (callable, optional): A closure that reevaluates the model
+                and returns the loss.
+        """
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        idx = 0
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                d_p = p.grad
+
+                # Add momentum
+                momentum = group['momentum']
                 if momentum > 0:
                     param_state = self.state[p]
                     if 'momentum_buffer' not in param_state:
                         param_state['momentum_buffer'] = d_p.detach().clone()
                     else:
                         param_state['momentum_buffer'].mul_(momentum).add_(d_p, alpha=1 - momentum)
-                v = constraint.linear_optimization_oracle(p.grad)
-                if self.rescale = 'diameter':
-                    factor = 1./constraint.
+                        d_p = param_state['momentum_buffer']
+
+                v = constraints[idx].lmo(d_p)  # LMO optimal solution
+
+                if self.rescale == 'diameter':
+                    # Rescale lr by diameter
+                    factor = 1. / constraints[idx].get_diameter()
+                elif self.rescale == 'gradient':
+                    # Rescale lr by gradient
+                    factor = torch.norm(d_p, p=2) / torch.norm(p - v, p=2)
+                else:
+                    # No rescaling
+                    factor = 1
+
+                lr = max(0.0, min(factor * group['lr'], 1.0))  # Clamp between [0, 1]
+
+                p.mul_(1 - lr)
+                p.add_(v, alpha=lr)
+                idx += 1
+        return loss
+
+
+
+# class StochasticFrankWolfe(Optimizer):
+#     def __init__(self, *args, **kwargs):
+#         pass
+    
+#     def step(self, constraint, closure=None):
+#         loss = None
+#         if closure is not None:
+#             with torch.enable_grad():
+#                 loss = closure()
+#         idx = 0
+#         for group in self.param_groups:
+#             for p in group['params']:
+#                 if p.grad is None:
+#                     continue
+#                 d_p = p.grad
+#                 if momentum > 0:
+#                     param_state = self.state[p]
+#                     if 'momentum_buffer' not in param_state:
+#                         param_state['momentum_buffer'] = d_p.detach().clone()
+#                     else:
+#                         param_state['momentum_buffer'].mul_(momentum).add_(d_p, alpha=1 - momentum)
+#                 v = constraint.linear_optimization_oracle(p.grad)
+#                 if self.rescale = 'diameter':
+#                     factor = 1./constraint.
